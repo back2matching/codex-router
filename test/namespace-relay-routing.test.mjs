@@ -3222,6 +3222,37 @@ test("routed native apply_patch relays LiteLLM arguments that are not a leading 
   }
 });
 
+test("routed inconsistent custom input is refused once with a non-retryable terminal", async () => {
+  for (const argumentsText of [JSON.stringify({ content: "second" }), '{"content":"first"} trailing']) {
+    const result = await scenario(true, {
+      model: "zai-coding/glm-5.3-flash",
+      requestPayload: (stream, model) => ({ model, stream, input: "Apply a test patch.", tools: [{ type: "custom", name: "apply_patch" }] }),
+      sseBody: () => [
+        sseEvent({ type: "response.created", sequence_number: 0, response: {
+          id: "resp_custom_rejected", model: "zai-coding-glm-5-3-flash", created_at: 1791840000, status: "in_progress", output: [],
+        } }),
+        sseEvent({ type: "response.output_item.added", sequence_number: 1, output_index: 0, item: {
+          type: "custom_tool_call", id: "call_rejected", call_id: "call_rejected", name: "apply_patch", input: "", status: "in_progress",
+        } }),
+        sseEvent({ type: "response.function_call_arguments.delta", sequence_number: 2, output_index: 0, item_id: "call_rejected", delta: JSON.stringify({ content: "first" }) }),
+        sseEvent({ type: "response.function_call_arguments.done", sequence_number: 3, output_index: 0, item_id: "call_rejected", arguments: argumentsText }),
+        sseEvent({ type: "response.output_item.done", sequence_number: 4, output_index: 0, item: {
+          type: "custom_tool_call", id: "call_rejected", call_id: "call_rejected", name: "apply_patch", input: "second", status: "completed",
+        } }),
+        sseEvent({ type: "response.completed", sequence_number: 5, response: { id: "resp_custom_rejected", output: [] } }),
+      ].join(""),
+    });
+    const events = result.clientBody.split(/\r?\n/).filter((line) => line.startsWith("data: {")).map((line) => JSON.parse(line.slice(6)));
+    assert.equal(result.gatewayBodies.length, 1, "the committed request is never replayed by the router");
+    const terminal = events.filter((event) => event.type === "response.failed");
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0].code, "ERR_NAMESPACE_RELAY_COMMITTED_STREAM");
+    assert.equal(terminal[0].response.error.code, "invalid_prompt");
+    assert.match(terminal[0].response.error.message, /custom tool argument deltas disagree/);
+    assert.equal(events.some((event) => event.type === "response.output_item.done" || event.type === "response.completed"), false, "unsafe input cannot execute or masquerade as completion");
+  }
+});
+
 test("a routed turn whose tool calls leaked into the reasoning channel still runs them", async () => {
   // Captured from rollout 01a0924e (opencode-go hy4-preview, 12 September 2026):
   // the model wrote its calls as text on the reasoning channel, nothing reached

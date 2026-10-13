@@ -50,11 +50,28 @@ test("a tracked failure keeps announced identity, next sequence, enum error, and
   assert.equal(failure.sequence_number, 8);
   assert.equal(failure.code, "invalid_function_call_arguments");
   assert.deepEqual(failure.response, {
-    ...identity, status: "failed", error: { code: "server_error", message: "fixture diagnosed cause" },
+    ...identity, status: "failed", error: { code: "invalid_prompt", message: "fixture diagnosed cause" },
     output: [], parallel_tool_calls: false, tool_choice: "none", tools: [],
   });
   assert.doesNotMatch(target.body(), /\[DONE\]/);
   observer.destroy();
+});
+
+test("local tool integrity failures end without retry advice while transport errors remain retryable", () => {
+  for (const code of ["ERR_NAMESPACE_RELAY_COMMITTED_STREAM", "invalid_function_call_arguments", "local_router_stream_failed"]) {
+    const target = response();
+    markResponsesStream(target);
+    const observer = observe(target, [frame(created())]);
+    endStreamedResponse(target, { code, message: "Local tool validation refused inconsistent input." });
+    const failure = events(target.body()).at(-1);
+    assert.equal(failure.type, "response.failed");
+    assert.equal(failure.code, code);
+    assert.equal(failure.response.error.code, code === "local_router_stream_failed" ? "server_error" : "invalid_prompt");
+    assert.deepEqual(failure.response.output, []);
+    assert.equal(target.writableEnded, true);
+    assert.equal(events(target.body()).filter((event) => event.type === "response.failed").length, 1);
+    observer.destroy();
+  }
 });
 
 test("each UTF-8/CRLF byte is forwarded before a whole event is available", () => {

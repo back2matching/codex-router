@@ -775,15 +775,13 @@ export async function finishResponse(response) {
 // silent corruption this function exists to avoid. Leading newlines are inert
 // when the stream did end cleanly: a blank line with no buffered fields
 // dispatches nothing.
-// `message` lets a caller that diagnosed the failure say so; the code stays
-// fixed, because a diagnosed cause is more detail about this same failure and
-// not a second kind of it. The default wording holds for every caller that
-// reaches here with nothing more specific -- a guessed cause is worse than an
-// honest generic one.
-export function endStreamedResponse(response, { message } = {}) {
+// The default code/message describe an unclassified transport failure. A caller
+// with a known local integrity failure may pass its exact code so the client
+// receives the correct retry classification; upstream error bodies stay out.
+export function endStreamedResponse(response, { code = "local_router_stream_failed", message } = {}) {
   if (!response || response.writableEnded || response.destroyed) return;
   writeStreamErrorEvent(response, {
-    code: "local_router_stream_failed",
+    code,
     message: message || "The local router lost the upstream response stream.",
   });
   response.end();

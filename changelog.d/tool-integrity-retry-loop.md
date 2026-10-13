@@ -1,0 +1,1 @@
+- Stop automatic Codex retries after a locally rejected inconsistent or malformed tool call, preserving the integrity check and reporting the actual failure. Ordinary transport failures keep their existing retry behavior.

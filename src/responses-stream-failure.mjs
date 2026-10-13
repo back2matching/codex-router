@@ -6,6 +6,14 @@ const MAX_ID_BYTES = 512;
 const MAX_MESSAGE_CHARS = 2_048;
 const MAX_CODE_CHARS = 128;
 const DEFAULT_MESSAGE = "The local router lost the upstream response stream.";
+// Codex retries unknown/server_error failures. These local integrity rejections
+// must end the turn: the already-relayed tool input cannot safely be replayed.
+// `invalid_prompt` is the Responses enum Codex classifies as non-retryable; the
+// outer code and message retain the actual local cause, not a user-prompt fault.
+const NON_RETRYABLE_TOOL_ERRORS = new Set([
+  "ERR_NAMESPACE_RELAY_COMMITTED_STREAM",
+  "invalid_function_call_arguments",
+]);
 const TERMINALS = new Set([
   "response.completed", "response.failed", "response.incomplete",
 ]);
@@ -264,7 +272,10 @@ export function responsesStreamFailure(response, { code, message }) {
         created_at: context.createdAt,
         model: context.model,
         status: "failed",
-        error: { code: "server_error", message: safeMessage },
+        error: {
+          code: NON_RETRYABLE_TOOL_ERRORS.has(safeCode) ? "invalid_prompt" : "server_error",
+          message: safeMessage,
+        },
         output: [],
         parallel_tool_calls: false,
         tool_choice: "none",

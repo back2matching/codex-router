@@ -6619,10 +6619,15 @@ const server = http.createServer((request, response) => {
       // The body is already streaming, so there is no status left to change.
       // Destroying here reset the socket and cost the chunked terminator,
       // which the client reported only as a decode failure. The event code
-      // stays `local_router_stream_failed`: a diagnosed cause is extra detail
-      // about the same failure, not a different one for a client to branch on.
+      // stays generic for transport failures. A known local tool-integrity
+      // rejection needs its own non-retryable terminal; server_error makes
+      // Codex resend the same failed turn and repeatedly spend provider quota.
+      const toolIntegrityFailure = error?.code === "ERR_NAMESPACE_RELAY_COMMITTED_STREAM";
       endStreamedResponse(response, {
-        message: transport
+        ...(toolIntegrityFailure ? { code: error.code } : {}),
+        message: toolIntegrityFailure
+          ? `${error.message} The inconsistent tool call was not completed. Automatic replay is unsafe; inspect the failure before retrying.`
+          : transport
           ? `The local router lost the upstream response stream: ${transport.cause}.${transport.hint}`
           : undefined,
       });
