@@ -1,0 +1,1 @@
+- Correct subagent diagnostics for enabled custom providers and distinguish managed agent names from explicit model overrides in the last published catalog, without changing settings.

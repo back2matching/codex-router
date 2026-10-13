@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { routedAgentDefinition } from "./codex-agent-catalog.mjs";
@@ -9,6 +9,18 @@ import {
 } from "./multi-agent-state.mjs";
 import { subagentProofSnapshot } from "./subagent-proofs.mjs";
 import { VERSION } from "./version.mjs";
+import { MERGED_CATALOG_PATH } from "./paths.mjs";
+
+// Publication is evidence of the last catalog, not live session readiness or
+// permission to promote a route. Missing/corrupt state remains unknown.
+export function readPublishedSubagentModels(filePath = MERGED_CATALOG_PATH) {
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8"));
+    return Array.isArray(parsed.models) ? parsed.models : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Why a route cannot be spawned as a subagent, answered before anything is
 // spent finding out (#804).
@@ -57,10 +69,18 @@ export function explainSubagentRoute({
   settings = readMultiAgentSettings(),
   proofs = subagentProofSnapshot(),
   routerVersion = VERSION,
+  publishedModels,
 } = {}) {
   const route = String(slug || "").trim();
   const blocks = [];
   const notes = [];
+  const modelOverride = {
+    source: "last_published_catalog",
+    catalogued: Array.isArray(publishedModels)
+      ? publishedModels.some((entry) => entry?.slug === route)
+      : null,
+    availability: "depends_on_client_tool_schema",
+  };
 
   const model = models.find((candidate) => String(candidate?.slug || "") === route);
   if (!model) {
@@ -79,7 +99,7 @@ export function explainSubagentRoute({
         ? `Run ./bin/curate-models ${prefix} to add it, or ./bin/control subagents status to see the routes you have.`
         : "Run ./bin/model-router codex providers list --json to see the routes you have. A subagent model is a routed provider/model slug, never a native one.",
     ));
-    return summarize(route, blocks, notes, { agentName: null, effort: undefined, reasoningLevels });
+    return summarize(route, blocks, notes, { agentName: null, effort: undefined, reasoningLevels, modelOverride });
   }
 
   const providerId = String(model.provider || "");
@@ -184,10 +204,11 @@ export function explainSubagentRoute({
     agentName,
     effort: configuredEffort,
     reasoningLevels,
+    modelOverride,
   });
 }
 
-function summarize(slug, blocks, notes, { agentName, effort, reasoningLevels }) {
+function summarize(slug, blocks, notes, { agentName, effort, reasoningLevels, modelOverride }) {
   // Sorted into the documented order rather than discovery order, so the fix
   // an operator is told to do first is the one that unblocks the rest.
   const ordered = [...blocks].sort(
@@ -199,6 +220,10 @@ function summarize(slug, blocks, notes, { agentName, effort, reasoningLevels }) 
     agentName: ordered.length === 0 ? agentName : null,
     blockers: ordered,
     notes,
+    // The legacy fields describe the managed agent-name route. An explicit
+    // model override need not have that named definition on disk.
+    scope: "managed_agent_name",
+    modelOverride,
     effort: {
       configured: effort ?? null,
       supported: reasoningLevels,
@@ -211,10 +236,16 @@ function summarize(slug, blocks, notes, { agentName, effort, reasoningLevels }) 
 export function formatSubagentExplanation(explanation) {
   const lines = [];
   if (explanation.spawnable) {
-    lines.push(`${explanation.slug} can be spawned as a subagent (agent name: ${explanation.agentName}).`);
+    lines.push(`${explanation.slug} can be spawned as a subagent by its managed agent name (${explanation.agentName}).`);
   } else {
-    lines.push(`${explanation.slug} cannot be spawned as a subagent.`);
+    lines.push(`${explanation.slug} cannot be spawned as a subagent by its managed agent name.`);
   }
+  const published = explanation.modelOverride?.catalogued;
+  lines.push(published === true
+    ? "The last published catalog contains this model. Explicit model overrides depend on the current client's tool schema, not the managed-name verdict above."
+    : published === false
+      ? "The last published catalog does not contain this model; explicit model override availability still depends on the current client's tool schema."
+      : "Explicit model override availability is unknown: no readable published catalog.");
   for (const blocker of explanation.blockers) {
     lines.push(`  - ${blocker.summary}`);
     if (blocker.fix) lines.push(`    ${blocker.fix}`);

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { userModelEntry } from "../src/user-models.mjs";
 
 // A test that isolates the state directory must isolate CODEX_HOME with it:
 // the agents directory is $CODEX_HOME/agents, and a scratch state pointed at a
@@ -13,7 +15,7 @@ process.env.CODEX_HOME = path.join(testRoot, "codex");
 mkdirSync(process.env.CODEX_ROUTER_STATE_DIR, { recursive: true });
 mkdirSync(path.join(process.env.CODEX_HOME, "agents"), { recursive: true });
 
-const { explainSubagentRoute, formatSubagentExplanation } = await import(
+const { explainSubagentRoute, formatSubagentExplanation, readPublishedSubagentModels } = await import(
   "../src/subagent-explain.mjs"
 );
 const { setSubagentEffort } = await import("../src/multi-agent-state.mjs");
@@ -200,4 +202,63 @@ test("a spawnable route says how to change its child reasoning depth", () => {
   const text = formatSubagentExplanation(explain({ agentsDir }));
   assert.match(text, /can be spawned as a subagent/);
   assert.match(text, /subagents effort opencode-go\/deepseek-v4\.1-flash <level>/);
+});
+
+test("published explicit model availability is distinct from the managed-name route", () => {
+  const result = explain({ agentsDir: path.join(testRoot, "absent-agents"), publishedModels: [
+    { slug: ROUTE.slug, multi_agent_version: "v1" },
+  ] });
+  assert.equal(result.spawnable, false);
+  assert.deepEqual(codes(result), ["agent_definition_missing"]);
+  assert.equal(result.scope, "managed_agent_name");
+  assert.equal(result.modelOverride.catalogued, true);
+  assert.equal(result.modelOverride.availability, "depends_on_client_tool_schema");
+  assert.match(formatSubagentExplanation(result), /explicit model override/i);
+  assert.equal(explain({ publishedModels: [] }).modelOverride.catalogued, false);
+  assert.equal(explain().modelOverride.catalogued, null);
+});
+
+test("an unreadable publication stays unknown instead of suggesting a settings change", () => {
+  const file = path.join(testRoot, "bad-publication.json");
+  assert.equal(readPublishedSubagentModels(file), undefined);
+  writeFileSync(file, "{malformed");
+  assert.equal(readPublishedSubagentModels(file), undefined);
+  writeFileSync(file, JSON.stringify({ models: [] }));
+  assert.deepEqual(readPublishedSubagentModels(file), []);
+});
+
+test("CLI explains enabled generic Kimi and Claude routes without rewriting settings", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "generic-subagent-explain-"));
+  const state = path.join(root, "state");
+  mkdirSync(state);
+  const providers = ["kimi-coding-plan", "claude-plan"];
+  const models = providers.map((id) => userModelEntry({
+    providerId: id, upstreamId: id === "claude-plan" ? "claude-opus-5.5" : "k3",
+    requestProfile: "auto-tool-choice", priority: 100,
+  }));
+  const files = {
+    "generic-providers.json": { version: 1, providers: providers.map((id) => ({
+      id, displayName: id, baseUrl: `https://${id}.example.test/v1`, adapter: "openai-chat", enabled: true,
+    })) },
+    "user-models.json": { version: 1, models },
+    "enabled-providers.json": { version: 1, providers: [] },
+    "merged-models.json": { models: models.map((m) => ({ slug: m.slug, multi_agent_version: "v1" })) },
+  };
+  for (const [file, content] of Object.entries(files)) writeFileSync(path.join(state, file), JSON.stringify(content));
+  const before = Object.keys(files).map((file) => readFileSync(path.join(state, file), "utf8"));
+  for (const model of models) {
+    const child = spawnSync(process.execPath, ["src/control.mjs", "subagents", "explain", model.slug, "--json"], {
+      cwd: process.cwd(), encoding: "utf8", env: { ...process.env,
+        CODEX_HOME: path.join(root, "codex"), CODEX_ROUTER_STATE_DIR: state,
+        MODEL_ROUTER_GENERIC_PROVIDERS: path.join(state, "generic-providers.json"),
+        MODEL_ROUTER_USER_MODELS: path.join(state, "user-models.json"),
+      },
+    });
+    assert.equal(child.status, 0, child.stderr);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.blockers.some((b) => b.code === "provider_disabled"), false);
+    assert.equal(result.modelOverride.catalogued, true);
+    assert.equal(result.scope, "managed_agent_name");
+  }
+  assert.deepEqual(Object.keys(files).map((file) => readFileSync(path.join(state, file), "utf8")), before);
 });
